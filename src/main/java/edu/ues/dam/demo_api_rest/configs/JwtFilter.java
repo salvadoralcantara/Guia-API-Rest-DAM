@@ -1,32 +1,47 @@
 package edu.ues.dam.demo_api_rest.configs;
 
 import edu.ues.dam.demo_api_rest.security.JwtUtil;
+import jakarta.annotation.PostConstruct;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import io.jsonwebtoken.Claims;
 
-@Configuration
-@EnableWebSecurity
+@Component
+@RequiredArgsConstructor
 public class JwtFilter extends OncePerRequestFilter {
 
-    @Autowired
-    private JwtUtil jwtUtil;
+    private static final Logger LOG = LoggerFactory.getLogger(JwtFilter.class);
 
-    Claims claims = null;
+    private final JwtUtil jwtUtil;
+
+    @PostConstruct
+    public void init() {
+        System.out.println(">>> JwtFilter: @PostConstruct called - bean inicializado");
+        LOG.info(">>> JwtFilter: bean inicializado");
+    }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
+        // DIAGNOSTICO: loguear siempre al entrar
+        String method = request.getMethod();
+        String uri = request.getRequestURI();
+        String contextPath = request.getContextPath();
+        String servletPath = request.getServletPath();
+        LOG.info(">>> JwtFilter ENTER: method={}, uri={}, contextPath={}, servletPath={}", method, uri, contextPath, servletPath);
+        System.out.println(">>> JwtFilter ENTER: method=" + method + " uri=" + uri + " contextPath=" + contextPath + " servletPath=" + servletPath);
+
+        // --- CORS headers básicos ---
         response.setHeader("Access-Control-Allow-Origin", "*");
         response.setHeader("Access-Control-Allow-Methods", "*");
         response.setHeader("Access-Control-Allow-Headers", "*");
@@ -34,43 +49,54 @@ public class JwtFilter extends OncePerRequestFilter {
         response.setHeader("Access-Control-Max-Age", "3600");
 
         // Preflight
-        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+        if ("OPTIONS".equalsIgnoreCase(method)) {
             response.setStatus(HttpServletResponse.SC_OK);
             return;
         }
 
-        String path = request.getServletPath();
+        // Obtener context path y URI y sacar solo la parte relativa a la app
+        String path = uri;
+        if (contextPath != null && !contextPath.isEmpty() && uri.startsWith(contextPath)) {
+            path = uri.substring(contextPath.length());     // ej: /auth/login
+        }
+        LOG.info(">>> JwtFilter relative path='{}'", path);
+
+        // RUTAS PÚBLICAS (no requieren token)
         if (path.startsWith("/auth/login")
                 || path.startsWith("/auth/register")
                 || path.startsWith("/auth/verify-token")
                 || path.startsWith("/swagger-ui/")
-                || path.startsWith("/v3/")) {
+                || path.startsWith("/v3/")
+                || path.startsWith("/actuator/")) {
+            LOG.info(">>> JwtFilter allowing public path '{}'", path);
             filterChain.doFilter(request, response);
             return;
         }
 
+        // Validación del header Authorization
         String authorizationHeader = request.getHeader("Authorization");
         String token = null;
 
         if (authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
             token = authorizationHeader.substring(7);
+            LOG.info(">>> JwtFilter found Bearer token, length={}", token.length());
         } else {
-            token = authorizationHeader;
+            LOG.info(">>> JwtFilter no Bearer token present (header={})", authorizationHeader);
         }
 
-        if (token != null && jwtUtil.validatedTokenPermission(token)) {
-            filterChain.doFilter(request, response);
-        } else {
-            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-            response.getWriter().write("No autorizado: Token no es el correcto o no proporcionado");
+        try {
+            if (token != null && jwtUtil.validatedTokenPermission(token)) {
+                LOG.info(">>> JwtFilter token validated, continuing filter chain");
+                filterChain.doFilter(request, response);
+            } else {
+                LOG.warn(">>> JwtFilter token invalid or missing; returning 401");
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.getWriter().write("No autorizado: Token no es el correcto o no proporcionado");
+            }
+        } catch (Exception ex) {
+            LOG.error(">>> JwtFilter exception validating token: {}", ex.getMessage(), ex);
+            response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+            response.getWriter().write("Error interno al validar token");
         }
-    }
-
-    public Boolean isAdmin() {
-        return "admin".equalsIgnoreCase((String) claims.get("role"));
-    }
-
-    public Boolean isOther() {
-        return "user".equalsIgnoreCase((String) claims.get("user"));
     }
 }

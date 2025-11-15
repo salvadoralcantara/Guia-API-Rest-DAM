@@ -1,94 +1,122 @@
 package edu.ues.dam.demo_api_rest.security;
 
-import edu.ues.dam.demo_api_rest.dtos.TokenDTO;
-import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.SignatureAlgorithm;
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.io.Decoders;
+import io.jsonwebtoken.security.Keys;
+import io.jsonwebtoken.security.WeakKeyException;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 
-import java.util.*;
-import java.util.function.Function;
+import javax.crypto.SecretKey;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Date;
 import java.util.stream.Collectors;
 
+import edu.ues.dam.demo_api_rest.dtos.TokenDTO;
+
 @Slf4j
-@Service
+@Component
 public class JwtUtil {
 
     @Value("${app.jwt.secret}")
-    private String secretKey;
+    private String jwtSecret;
 
-    private final long EXPIRATION = 1800000L; // 30 minutos
+    @Value("${app.jwt.expiration-ms:1800000}")
+    private long jwtExpirationMs;
 
-    public String extractUsername(String token) {
-        return extractClaims(token, Claims::getSubject);
+    private SecretKey signingKey;
+
+    @PostConstruct
+    private void init() {
+        signingKey = createSigningKey(jwtSecret);
+        log.info("JwtUtil: signing key inicializada (algoritmo HS256)");
     }
 
-    public Date extractExpiration(String token) {
-        return extractClaims(token, Claims::getExpiration);
+    private SecretKey createSigningKey(String secret) {
+        if (secret == null) {
+            throw new IllegalArgumentException("JWT secret no puede ser null");
+        }
+
+        byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
+
+        try {
+            if (secret.matches("^[A-Za-z0-9+/=\\r\\n]+$")) {
+                try {
+                    byte[] decoded = Decoders.BASE64.decode(secret);
+                    if (decoded.length >= 32) {
+                        return Keys.hmacShaKeyFor(decoded);
+                    } else {
+                        keyBytes = decoded;
+                    }
+                } catch (Exception ex) {
+                    // no era base64 válido -> continuar
+                }
+            }
+        } catch (Exception ignored) { }
+
+        if (keyBytes.length < 32) {
+            try {
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                keyBytes = md.digest(keyBytes);
+                log.warn("JwtUtil: secreto corto; se usó SHA-256 del secreto para crear una clave de 256 bits.");
+            } catch (NoSuchAlgorithmException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        try {
+            return Keys.hmacShaKeyFor(keyBytes);
+        } catch (WeakKeyException wke) {
+            log.warn("JwtUtil: llave aun débil, generando key segura nueva (no determinista).");
+            return Keys.secretKeyFor(SignatureAlgorithm.HS256);
+        }
     }
 
-    public <T> T extractClaims(String token, Function<Claims, T> claimsResolver) {
-        final Claims claims = extactAllClaims(token);
-        return claimsResolver.apply(claims);
-    }
+    public TokenDTO generateToken(String username, UserDetails userDetails) {
+        Date now = new Date();
+        Date expiry = new Date(now.getTime() + jwtExpirationMs);
 
-    public Claims extactAllClaims(String token) {
-        return Jwts.parser().setSigningKey(secretKey).parseClaimsJws(token).getBody();
-    }
-
-    public boolean isTokenExpired(String token) {
-        return extractExpiration(token).before(new Date());
-    }
-
-    public TokenDTO generateToken(String userName, UserDetails userDetails) {
-        Map<String, Object> claims = new HashMap<>();
-        String authorities = userDetails.getAuthorities().stream()
-                .map(GrantedAuthority::getAuthority)
+        String roles = userDetails.getAuthorities().stream()
+                .map(Object::toString)
                 .collect(Collectors.joining(","));
-        claims.put("authorities", authorities);
-        return createToken(claims, userName);
+
+        String jwt = Jwts.builder()
+                .setSubject(username)
+                .claim("roles", roles)
+                .setIssuedAt(now)
+                .setExpiration(expiry)
+                .signWith(signingKey, SignatureAlgorithm.HS256)
+                .compact();
+
+        TokenDTO dto = new TokenDTO();
+        dto.setToken(jwt); // solo seteamos el token para evitar método inexistente en TokenDTO
+        return dto;
     }
 
-    private TokenDTO createToken(Map<String, Object> claims, String userName) {
-        TokenDTO newToken = new TokenDTO();
-        newToken.setExpireIn(String.valueOf(EXPIRATION));
-
-        String token = Jwts.builder()
-                .setClaims(claims)
-                .setSubject(userName)
-                .setIssuedAt(new Date(System.currentTimeMillis()))
-                .setExpiration(new Date(System.currentTimeMillis() + EXPIRATION))
-                .signWith(SignatureAlgorithm.HS256, secretKey).compact();
-
-        newToken.setToken(token);
-        newToken.setMsj("ok");
-        return newToken;
-    }
-
-    public Boolean validateToken(String token, UserDetails userDetails) {
-        final String userName = extractUsername(token);
-        return (userName.equals(userDetails.getUsername()) && !isTokenExpired(token));
-    }
-
-    /**
-     * Validates token and, if valid, sets a basic Authentication in SecurityContextHolder.
-     * This method mirrors the guide's validatedTokenPermission.
-     */
     public boolean validatedTokenPermission(String token) {
         try {
-            String email = extractUsername(token);
-            // Create a basic authentication token with no authorities
-            org.springframework.security.authentication.UsernamePasswordAuthenticationToken authentication =
-                    new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(email, null, new ArrayList<>());
-            org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(authentication);
+            Jws<Claims> claims = Jwts.parserBuilder()
+                    .setSigningKey(signingKey)
+                    .build()
+                    .parseClaimsJws(token);
             return true;
-        } catch (Exception e) {
-            log.error("Token validation error: {}", e.getMessage());
+        } catch (JwtException | IllegalArgumentException e) {
+            log.warn("JwtUtil: token inválido -> {}", e.getMessage());
             return false;
         }
+    }
+
+    public String getUsernameFromToken(String token) {
+        Claims claims = Jwts.parserBuilder()
+                .setSigningKey(signingKey)
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+        return claims.getSubject();
     }
 }
