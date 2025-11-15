@@ -1,6 +1,7 @@
 package edu.ues.dam.demo_api_rest.configs;
 
 import edu.ues.dam.demo_api_rest.security.JwtUtil;
+import edu.ues.dam.demo_api_rest.configs.CustomerDetailServices;
 import jakarta.annotation.PostConstruct;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -9,6 +10,10 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -21,6 +26,7 @@ public class JwtFilter extends OncePerRequestFilter {
     private static final Logger LOG = LoggerFactory.getLogger(JwtFilter.class);
 
     private final JwtUtil jwtUtil;
+    private final CustomerDetailServices customerDetailServices; // inyectado para obtener authorities
 
     @PostConstruct
     public void init() {
@@ -78,7 +84,7 @@ public class JwtFilter extends OncePerRequestFilter {
         String token = null;
 
         if (authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
-            token = authorizationHeader.substring(7);
+            token = authorizationHeader.substring(7).trim();
             LOG.info(">>> JwtFilter found Bearer token, length={}", token.length());
         } else {
             LOG.info(">>> JwtFilter no Bearer token present (header={})", authorizationHeader);
@@ -86,7 +92,20 @@ public class JwtFilter extends OncePerRequestFilter {
 
         try {
             if (token != null && jwtUtil.validatedTokenPermission(token)) {
-                LOG.info(">>> JwtFilter token validated, continuing filter chain");
+                // --- NUEVO: poblar SecurityContext con Authentication ---
+                String username = jwtUtil.getUsernameFromToken(token);
+                if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+                    UserDetails userDetails = customerDetailServices.loadUserByUsername(username);
+                    UsernamePasswordAuthenticationToken authentication =
+                            new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
+                    authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                    SecurityContextHolder.getContext().setAuthentication(authentication);
+
+                    LOG.info(">>> JwtFilter token validated and authentication set for user '{}'", username);
+                } else {
+                    LOG.debug(">>> JwtFilter username is null or authentication already present");
+                }
+                // continuar la cadena
                 filterChain.doFilter(request, response);
             } else {
                 LOG.warn(">>> JwtFilter token invalid or missing; returning 401");
@@ -95,6 +114,8 @@ public class JwtFilter extends OncePerRequestFilter {
             }
         } catch (Exception ex) {
             LOG.error(">>> JwtFilter exception validating token: {}", ex.getMessage(), ex);
+            // limpiar contexto por seguridad
+            SecurityContextHolder.clearContext();
             response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
             response.getWriter().write("Error interno al validar token");
         }
