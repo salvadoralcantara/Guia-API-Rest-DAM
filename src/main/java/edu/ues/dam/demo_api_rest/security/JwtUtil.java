@@ -15,6 +15,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Date;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import edu.ues.dam.demo_api_rest.dtos.TokenDTO;
@@ -30,6 +32,9 @@ public class JwtUtil {
     private long jwtExpirationMs;
 
     private SecretKey signingKey;
+
+    // Blacklist en memoria: token - expirationMillis
+    private final ConcurrentHashMap<String, Long> blacklistedTokens = new ConcurrentHashMap<>();
 
     @PostConstruct
     private void init() {
@@ -54,7 +59,6 @@ public class JwtUtil {
                         keyBytes = decoded;
                     }
                 } catch (Exception ex) {
-                    // no era base64 válido -> continuar
                 }
             }
         } catch (Exception ignored) { }
@@ -94,16 +98,65 @@ public class JwtUtil {
                 .compact();
 
         TokenDTO dto = new TokenDTO();
-        dto.setToken(jwt); // solo seteamos el token para evitar método inexistente en TokenDTO
+        dto.setToken(jwt); // solo seteamos el token
         return dto;
     }
 
+    // Invalida (blacklist) un token hasta su fecha de expiración
+    // Si no puede parsear la fecha, lo agrega temporalmente (5 min)
+
+    public void invalidateToken(String token) {
+        if (token == null || token.isBlank()) return;
+        try {
+            Claims claims = Jwts.parserBuilder()
+                    .setSigningKey(signingKey)
+                    .build()
+                    .parseClaimsJws(token)
+                    .getBody();
+            Date exp = claims.getExpiration();
+            long expMillis = (exp != null) ? exp.getTime() : (System.currentTimeMillis() + 5 * 60 * 1000L);
+            blacklistedTokens.put(token, expMillis);
+            log.info("JwtUtil: token invalidado y agregado al blacklist, expira en: {}", new Date(expMillis));
+        } catch (JwtException | IllegalArgumentException ex) {
+            long tmpExpire = System.currentTimeMillis() + 5 * 60 * 1000L; // 5 minutos temporal
+            blacklistedTokens.put(token, tmpExpire);
+            log.warn("JwtUtil: token no parseable al invalidar; agregado temporalmente al blacklist.");
+        }
+    }
+
+    //Comprueba si token está blacklisteado; si su expiración pasó, lo limpia
+
+    public boolean isBlacklisted(String token) {
+        if (token == null) return false;
+        Long expMillis = blacklistedTokens.get(token);
+        if (expMillis == null) return false;
+        if (expMillis < System.currentTimeMillis()) {
+            blacklistedTokens.remove(token);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Valida firma y que no esté en blacklist.
+     */
     public boolean validatedTokenPermission(String token) {
         try {
+            if (isBlacklisted(token)) {
+                log.warn("JwtUtil: token rechazado (blacklist).");
+                return false;
+            }
+
             Jws<Claims> claims = Jwts.parserBuilder()
                     .setSigningKey(signingKey)
                     .build()
                     .parseClaimsJws(token);
+
+            Date exp = claims.getBody().getExpiration();
+            if (exp != null && exp.before(new Date())) {
+                log.warn("JwtUtil: token expirado (fecha de expiración encontrada).");
+                return false;
+            }
             return true;
         } catch (JwtException | IllegalArgumentException e) {
             log.warn("JwtUtil: token inválido -> {}", e.getMessage());
@@ -118,5 +171,9 @@ public class JwtUtil {
                 .parseClaimsJws(token)
                 .getBody();
         return claims.getSubject();
+    }
+
+    public Map<String, Long> getBlacklistedTokensSnapshot() {
+        return Map.copyOf(blacklistedTokens);
     }
 }

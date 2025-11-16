@@ -26,7 +26,7 @@ public class JwtFilter extends OncePerRequestFilter {
     private static final Logger LOG = LoggerFactory.getLogger(JwtFilter.class);
 
     private final JwtUtil jwtUtil;
-    private final CustomerDetailServices customerDetailServices; // inyectado para obtener authorities
+    private final CustomerDetailServices customerDetailServices;
 
     @PostConstruct
     public void init() {
@@ -39,7 +39,6 @@ public class JwtFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
-        // DIAGNOSTICO: loguear siempre al entrar
         String method = request.getMethod();
         String uri = request.getRequestURI();
         String contextPath = request.getContextPath();
@@ -47,14 +46,12 @@ public class JwtFilter extends OncePerRequestFilter {
         LOG.info(">>> JwtFilter ENTER: method={}, uri={}, contextPath={}, servletPath={}", method, uri, contextPath, servletPath);
         System.out.println(">>> JwtFilter ENTER: method=" + method + " uri=" + uri + " contextPath=" + contextPath + " servletPath=" + servletPath);
 
-        // --- CORS headers básicos ---
         response.setHeader("Access-Control-Allow-Origin", "*");
         response.setHeader("Access-Control-Allow-Methods", "*");
         response.setHeader("Access-Control-Allow-Headers", "*");
         response.setHeader("Access-Control-Allow-Credentials", "false");
         response.setHeader("Access-Control-Max-Age", "3600");
 
-        // Preflight
         if ("OPTIONS".equalsIgnoreCase(method)) {
             response.setStatus(HttpServletResponse.SC_OK);
             return;
@@ -92,7 +89,6 @@ public class JwtFilter extends OncePerRequestFilter {
 
         try {
             if (token != null && jwtUtil.validatedTokenPermission(token)) {
-                // --- NUEVO: poblar SecurityContext con Authentication ---
                 String username = jwtUtil.getUsernameFromToken(token);
                 if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
                     UserDetails userDetails = customerDetailServices.loadUserByUsername(username);
@@ -105,7 +101,7 @@ public class JwtFilter extends OncePerRequestFilter {
                 } else {
                     LOG.debug(">>> JwtFilter username is null or authentication already present");
                 }
-                // continuar la cadena
+
                 filterChain.doFilter(request, response);
             } else {
                 LOG.warn(">>> JwtFilter token invalid or missing; returning 401");
@@ -114,7 +110,6 @@ public class JwtFilter extends OncePerRequestFilter {
             }
         } catch (Exception ex) {
             LOG.error(">>> JwtFilter exception validating token: {}", ex.getMessage(), ex);
-            // limpiar contexto por seguridad
             SecurityContextHolder.clearContext();
             response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
             response.getWriter().write("Error interno al validar token");

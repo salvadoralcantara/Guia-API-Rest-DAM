@@ -4,11 +4,15 @@ import edu.ues.dam.demo_api_rest.dtos.LoginDTO;
 import edu.ues.dam.demo_api_rest.dtos.RegisterDTO;
 import edu.ues.dam.demo_api_rest.dtos.TokenDTO;
 import edu.ues.dam.demo_api_rest.entities.User;
+import edu.ues.dam.demo_api_rest.security.JwtUtil;
 import edu.ues.dam.demo_api_rest.services.AuthServices;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import jakarta.servlet.http.HttpServletRequest;
+import java.util.Map;
 
 @Slf4j
 @RestController
@@ -17,6 +21,7 @@ import org.springframework.web.bind.annotation.*;
 public class AuthController {
 
     private final AuthServices authServices;
+    private final JwtUtil jwtUtil;
 
     @PostMapping("/login")
     public ResponseEntity<TokenDTO> login(@RequestBody LoginDTO authRequest) {
@@ -50,8 +55,20 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ResponseEntity<?> logout() {
+    public ResponseEntity<?> logout(HttpServletRequest request) {
         log.info("AuthController.logout() called");
-        return ResponseEntity.ok().body("{\"msj\":\"logout ok\"}");
+        String authorizationHeader = request.getHeader("Authorization");
+        if (authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
+            String token = authorizationHeader.substring(7).trim();
+            try {
+                jwtUtil.invalidateToken(token);
+                return ResponseEntity.ok(Map.of("msj", "logout ok"));
+            } catch (Exception ex) {
+                log.error("AuthController.logout() error invalidando token: {}", ex.getMessage(), ex);
+                return ResponseEntity.status(500).body(Map.of("msj", "error invalidando token"));
+            }
+        } else {
+            return ResponseEntity.badRequest().body(Map.of("msj", "no token provided"));
+        }
     }
 }
